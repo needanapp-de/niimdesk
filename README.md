@@ -13,6 +13,8 @@ drucken, ohne die Handy-App.
 
 Getestet mit B1, Firmware 5.20, und Original-Etiketten 50 × 30 mm unter Ubuntu 26.04.
 
+> Inoffizielles Projekt, nicht mit NIIMBOT verbunden (siehe [Lizenz](#lizenz)).
+
 ## Installation
 
 ### Fertiges Paket
@@ -199,6 +201,10 @@ Ein Drucker ist dafür nicht nötig.
 ## Lizenz
 
 MIT, siehe [LICENSE](LICENSE).
+
+niimdesk ist ein unabhängiges Projekt und kein offizielles Produkt von NIIMBOT. Es steht in keiner Verbindung
+zum Hersteller und wird von ihm weder unterstützt noch geprüft. „NIIMBOT“ ist eine Marke ihres Inhabers und
+wird hier nur verwendet, um die unterstützten Geräte zu benennen. Nutzung auf eigenes Risiko.
 
 - **Druckerprotokoll:** basiert auf [niimbluelib](https://github.com/MultiMote/niimbluelib) von MultiMote (MIT).
 - **Schrift:** DejaVu Sans (Bitstream-Vera-Lizenz).
