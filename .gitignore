@@ -1,0 +1,10 @@
+.venv/
+.venv-win/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+packaging/niimdesk.ico
+packaging/niimdesk.png
+*.apkm
