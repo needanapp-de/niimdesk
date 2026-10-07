@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import copy
+import html
 import json
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -36,12 +38,15 @@ from niimdesk import __version__
 from niimdesk.config import Config
 from niimdesk.gui.canvas import LabelCanvas
 from niimdesk.gui.device_dialog import DeviceDialog
+from niimdesk.gui.merge_panel import MergePanel
+from niimdesk.gui.merge_widgets import ElementContext, table_icon
 from niimdesk.gui.properties import PropertyPanel, combo, mm_spin, select_data
 from niimdesk.gui.worker import PrinterWorker
 from niimdesk.models import DEFAULT_MODEL, PrinterModel
 from niimdesk.protocol.client import PrinterInfo
 from niimdesk.protocol.commands import LABEL_TYPE_NAMES
 from niimdesk.protocol.parsers import Heartbeat, RfidInfo
+from niimdesk.render import merge
 from niimdesk.render.label import (
     BarcodeElement,
     Element,
@@ -54,10 +59,14 @@ from niimdesk.render.label import (
     render,
     testpage_label,
 )
+from niimdesk.table import Table, TableError, read_table, write_template
 
 LABEL_PRESETS = [(50, 30), (50, 20), (40, 30), (40, 20), (30, 20), (30, 15), (25, 15), (20, 10)]
 IMAGE_FILTER = "Bilder (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)"
 TEMPLATE_FILTER = "niimdesk-Vorlagen (*.json)"
+TABLE_FILTER = "Tabellen (*.xlsx *.xlsm *.csv *.txt);;Alle Dateien (*)"
+XLSX_FILTER = "Excel-Tabelle (*.xlsx)"
+CSV_FILTER = "CSV, Semikolon-getrennt (*.csv)"
 
 
 class MainWindow(QMainWindow):
@@ -77,6 +86,27 @@ class MainWindow(QMainWindow):
         self._user_initiated_connect = False
         self._asked_rolls: set[str] = set()
 
+        # serial printing
+        self.table: Table | None = None
+        self._table_example: dict[str, str] = {}
+        self.merged: list[merge.MergedRow] = []
+        self.preview_row = -1
+        self._job = (0, 1)
+        self._jobs_done = 0
+        self._job_labels = 0
+        self._reload_pending = False
+        self._reload_attempts = 0
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(lambda _path: self._reload_timer.start())
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.setInterval(800)  # Excel & co. write the file in several steps
+        self._reload_timer.timeout.connect(lambda: self.reload_table(quiet=True))
+        self._merge_timer = QTimer(self)
+        self._merge_timer.setSingleShot(True)
+        self._merge_timer.setInterval(250)
+        self._merge_timer.timeout.connect(self._recompute_merge)
+
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(0)
@@ -88,7 +118,8 @@ class MainWindow(QMainWindow):
         self._load_label_into_ui()
         self._update_printer_ui()
         self._update_roll_ui()
-        self.resize(1280, 760)
+        self._update_merge_ui()
+        self.resize(1280, 800)
         self.canvas.setFocus()
 
         if config.auto_connect and config.printer_address:
@@ -142,9 +173,21 @@ class MainWindow(QMainWindow):
         self.canvas.selection_changed.connect(self._on_canvas_selection)
         self.canvas.geometry_changed.connect(self._on_canvas_geometry)
         self.canvas.delete_requested.connect(self.delete_element)
-        splitter.addWidget(self.canvas)
+        self.merge_panel = MergePanel()
+        self.merge_panel.row_selected.connect(self._on_merge_row)
+        self.merge_panel.checks_changed.connect(self._update_merge_ui)
+        self.merge_panel.reload_requested.connect(self.reload_table)
+        self.merge_panel.close_requested.connect(self.close_table)
+        self.merge_panel.setVisible(False)
+        center = QSplitter(Qt.Orientation.Vertical)
+        center.addWidget(self.canvas)
+        center.addWidget(self.merge_panel)
+        center.setStretchFactor(0, 3)
+        center.setStretchFactor(1, 2)
+        splitter.addWidget(center)
 
         self.properties = PropertyPanel()
+        self.properties.set_context(ElementContext(lambda: self.label, self._preview_record))
         self.properties.changed.connect(self._on_property_changed)
         self.properties.replace_image_requested.connect(self.replace_image)
         scroll = QScrollArea()
@@ -228,6 +271,26 @@ class MainWindow(QMainWindow):
         v.addLayout(row)
         layout.addWidget(group, 1)
 
+        # serial printing
+        group = QGroupBox("Seriendruck aus Tabelle")
+        v = QVBoxLayout(group)
+        self.merge_info = QLabel()
+        self.merge_info.setWordWrap(True)
+        self.merge_info.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(self.merge_info)
+        row = QHBoxLayout()
+        button = QPushButton("Tabelle erstellen …")
+        button.setToolTip("Excel-Tabelle mit den passenden Spalten für dieses Etikett speichern")
+        button.clicked.connect(self.export_table)
+        row.addWidget(button)
+        button = QPushButton("Tabelle öffnen …")
+        button.setIcon(table_icon())
+        button.setToolTip("Ausgefüllte Tabelle laden: jede Zeile ergibt ein Etikett")
+        button.clicked.connect(lambda: self.open_table())
+        row.addWidget(button)
+        v.addLayout(row)
+        layout.addWidget(group)
+
         # printing
         group = QGroupBox("Drucken")
         v = QVBoxLayout(group)
@@ -235,6 +298,7 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("Kopien"))
         self.copies_spin = QSpinBox()
         self.copies_spin.setRange(1, 999)
+        self.copies_spin.valueChanged.connect(lambda _: self._schedule_merge())
         row.addWidget(self.copies_spin, 1)
         v.addLayout(row)
         self.print_button = QPushButton("Drucken")
@@ -300,6 +364,12 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         action(m, "Druckversatz …", self.show_offset_dialog)
 
+        m = self.menuBar().addMenu("&Seriendruck")
+        action(m, "Tabelle erstellen …", self.export_table)
+        action(m, "Tabelle öffnen …", lambda: self.open_table())
+        self.reload_table_action = action(m, "Tabelle neu laden", lambda: self.reload_table(), QKeySequence.StandardKey.Refresh)
+        self.close_table_action = action(m, "Tabelle schließen", self.close_table)
+
         m = self.menuBar().addMenu("&Hilfe")
         action(m, "Über niimdesk", self.show_about)
 
@@ -312,6 +382,8 @@ class MainWindow(QMainWindow):
         w.heartbeat.connect(self._on_heartbeat)
         w.rfid.connect(self._on_rfid)
         w.print_progress.connect(self._on_print_progress)
+        w.print_job.connect(self._on_print_job)
+        w.print_job_done.connect(self._on_print_job_done)
         w.print_finished.connect(self._on_print_finished)
         w.print_failed.connect(self._on_print_failed)
         w.printer_error.connect(lambda msg: self.statusBar().showMessage(f"Drucker meldet: {msg}", 8000))
@@ -335,6 +407,7 @@ class MainWindow(QMainWindow):
         self._refresh_list()
         self.properties.set_element(None)
         self._schedule_render()
+        self._schedule_merge()
         self._update_title()
 
     def _sync_preset(self) -> None:
@@ -350,9 +423,10 @@ class MainWindow(QMainWindow):
         current = self.canvas.selected()
         self.element_list.blockSignals(True)
         self.element_list.clear()
+        context = ElementContext(lambda: self.label, self._preview_record)
         for element in self.label.elements:
             text = element.summary()
-            if element.validate():
+            if context.check(element):
                 text = "⚠ " + text
             self.element_list.addItem(text)
         self.element_list.setCurrentRow(current)
@@ -363,7 +437,18 @@ class MainWindow(QMainWindow):
 
     def _render(self) -> None:
         self.canvas.set_printer_geometry(self.model.dpi, self.printhead_px)
-        self.canvas.set_preview(render(self.label, self.model.dpi))
+        self.canvas.set_preview(render(self._preview_label(), self.model.dpi))
+
+    def _preview_record(self) -> dict[str, str]:
+        """Values for the {column} placeholders in the preview: selected table row, else the example."""
+        if self.table is not None and 0 <= self.preview_row < len(self.table.rows):
+            return self.table.rows[self.preview_row]
+        return self.label.sample
+
+    def _preview_label(self) -> Label:
+        if not merge.has_placeholders(self.label):
+            return self.label
+        return merge.fill_label(self.label, self._preview_record(), strict=False)[0]
 
     def _changed(self, refresh_list: bool = False) -> None:
         if not self.dirty:
@@ -372,6 +457,7 @@ class MainWindow(QMainWindow):
         if refresh_list:
             self._refresh_list()
         self._schedule_render()
+        self._schedule_merge()
 
     def _update_title(self) -> None:
         name = self.path.name if self.path else "Neues Etikett"
@@ -518,7 +604,8 @@ class MainWindow(QMainWindow):
         i = self.canvas.selected()
         element = self._selected_element()
         if element is not None and (item := self.element_list.item(i)) is not None:
-            item.setText(("⚠ " if element.validate() else "") + element.summary())
+            context = ElementContext(lambda: self.label, self._preview_record)
+            item.setText(("⚠ " if context.check(element) else "") + element.summary())
         self.canvas.update()
         self._changed()
 
@@ -564,6 +651,7 @@ class MainWindow(QMainWindow):
     def save_label(self) -> bool:
         if self.path is None:
             return self.save_label_as()
+        merge.prune_sample(self.label)
         try:
             self.path.write_text(json.dumps(self.label.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         except OSError as e:
@@ -862,47 +950,341 @@ class MainWindow(QMainWindow):
             text += " · <span style='color:#d03030'><b>" + ", ".join(warnings) + "</b></span>"
         return text
 
+    # --- serial printing ---------------------------------------------------
+
+    def _schedule_merge(self) -> None:
+        if self.table is not None:
+            self._merge_timer.start()
+        self._update_merge_ui()
+
+    def _update_merge_ui(self) -> None:
+        if self.table is not None:
+            rows = self.merge_panel.checked()
+            labels = sum(r.copies for r in rows)
+            name = html.escape(self.table.path.name if self.table.path else "Tabelle")
+            self.merge_info.setText(f"<b>{name}</b>: {len(rows)} von {len(self.table.rows)} Zeilen ausgewählt")
+            self.print_button.setText(f"{labels} Etikett{'en' if labels != 1 else ''} drucken")
+        else:
+            columns = merge.column_names(self.label)
+            if columns:
+                self.merge_info.setText("Tabellenspalten: " + html.escape(", ".join(columns)))
+            else:
+                self.merge_info.setText(
+                    "<span style='color:gray'>Werte aus einer Excel-Tabelle drucken: im QR-Code auf das "
+                    "Tabellen-Symbol klicken oder {Spalte} in einen Text schreiben.</span>"
+                )
+            self.print_button.setText("Drucken")
+        self.reload_table_action.setEnabled(self.table is not None)
+        self.close_table_action.setEnabled(self.table is not None)
+
+    def _recompute_merge(self) -> None:
+        self._merge_timer.stop()
+        if self.table is None:
+            return
+        self.merged = merge.merge_rows(
+            self.label, self.table.rows, self.table.lines, self.copies_spin.value(), self._table_example
+        )
+        messages = [html.escape(w) for w in self.table.warnings]
+        if not merge.has_placeholders(self.label):
+            messages.insert(
+                0,
+                "Das Etikett enthält keine Tabellenfelder, jede Zeile ergibt dasselbe Etikett. Im QR-Code auf "
+                "das Tabellen-Symbol klicken oder {Spalte} in einen Text schreiben.",
+            )
+        elif missing := merge.missing_columns(self.label, self.table.columns):
+            messages.insert(
+                0,
+                "In der Tabelle fehlen die Spalten <b>" + html.escape(", ".join(missing)) + "</b>. "
+                "Spaltennamen in der Tabelle oder im Etikett angleichen oder die Tabelle neu erstellen.",
+            )
+        self.merge_panel.set_results(self.merged, messages)
+        self._update_merge_ui()
+
+    def _on_merge_row(self, index: int) -> None:
+        self.preview_row = index
+        self._schedule_render()
+        self._refresh_list()
+        self.properties.refresh_geometry()
+
+    def export_table(self) -> None:
+        if not merge.column_names(self.label):
+            QMessageBox.information(
+                self,
+                "Tabelle erstellen",
+                "Das Etikett hat noch keine Tabellenfelder.\n\n"
+                "• QR-Code: neben einem Feld auf das Tabellen-Symbol klicken oder „Alle Felder aus Tabelle“ "
+                "wählen.\n"
+                "• Text und Barcode: „Tabellenspalte einfügen“ oder {Spaltenname} direkt eintippen.\n\n"
+                "Jedes Tabellenfeld wird eine Spalte, jede Zeile der Tabelle ein Etikett.",
+            )
+            return
+        stem = self.path.stem if self.path else "etiketten"
+        start = str(Path(self.config.last_directory or Path.home()) / f"{stem}-tabelle.xlsx")
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Tabelle für den Seriendruck erstellen", start, f"{XLSX_FILTER};;{CSV_FILTER}"
+        )
+        if not path:
+            return
+        target = Path(path)
+        if target.suffix.lower() not in (".xlsx", ".csv"):
+            target = target.with_name(target.name + (".csv" if selected == CSV_FILTER else ".xlsx"))
+        merge.prune_sample(self.label)
+        try:
+            write_template(target, self.label, self.path.name if self.path else "")
+        except (OSError, TableError) as e:
+            QMessageBox.warning(self, "Tabelle erstellen", f"Die Tabelle konnte nicht gespeichert werden:\n{e}")
+            return
+        self.config.last_directory = str(target.parent)
+        self.config.save()
+        answer = QMessageBox.question(
+            self,
+            "Tabelle erstellt",
+            f"„{target.name}“ ist gespeichert: eine Spalte pro Tabellenfeld, Zeile 2 ist ein Beispiel.\n\n"
+            "Jetzt mit Excel oder LibreOffice öffnen? niimdesk zeigt die Tabelle unter der Vorschau an und "
+            "lädt sie neu, sobald du sie dort speicherst.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._load_table(target, ask_template=False)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        else:
+            self.statusBar().showMessage(f"Tabelle gespeichert: {target}", 6000)
+
+    def open_table(self, path: Path | None = None) -> None:
+        if path is None:
+            name, _ = QFileDialog.getOpenFileName(
+                self, "Tabelle für den Seriendruck öffnen", self.config.last_directory, TABLE_FILTER
+            )
+            if not name:
+                return
+            path = Path(name)
+        self.config.last_directory = str(path.parent)
+        self.config.save()
+        self._load_table(path, ask_template=True)
+
+    def _load_table(self, path: Path, ask_template: bool) -> bool:
+        try:
+            table = read_table(path)
+        except (OSError, TableError) as e:
+            QMessageBox.warning(self, "Tabelle öffnen", f"„{path.name}“ kann nicht gelesen werden:\n{e}")
+            return False
+        if ask_template and table.template is not None:
+            self._offer_table_template(table)
+        self._show_table(table, keep_state=False)
+        return True
+
+    def _offer_table_template(self, table: Table) -> None:
+        """A table created by niimdesk carries its label: offer to load it."""
+        assert table.template is not None
+        embedded = Label.from_dict(table.template)
+        merge.prune_sample(self.label)  # the embedded label was saved pruned as well
+        if embedded.to_dict() == self.label.to_dict():
+            return
+        name = Path(table.template_name).name if table.template_name else ""
+        if merge.has_placeholders(self.label):
+            box = QMessageBox(
+                QMessageBox.Icon.Question,
+                "Tabelle öffnen",
+                f"Die Tabelle wurde für das Etikett „{name or 'ohne Namen'}“ erstellt, das gerade nicht geöffnet "
+                "ist. Welches Etikett soll verwendet werden?",
+                parent=self,
+            )
+            use = box.addButton("Etikett aus der Tabelle", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Aktuelles Etikett", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is not use:
+                return
+        if not self._confirm_discard():
+            return
+        self.path = None
+        if name and table.path is not None and (candidate := table.path.parent / name).is_file():
+            try:
+                if Label.from_dict(json.loads(candidate.read_text(encoding="utf-8"))).to_dict() == embedded.to_dict():
+                    self.path = candidate
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        self.label, self.dirty = embedded, False
+        self._load_label_into_ui()
+        self._apply_roll()
+        self.statusBar().showMessage(f"Etikett „{name or 'ohne Namen'}“ aus der Tabelle übernommen", 6000)
+
+    def _show_table(self, table: Table, keep_state: bool) -> None:
+        self.table = table
+        self._table_example = merge.example_values(Label.from_dict(table.template)) if table.template else {}
+        if not keep_state or not 0 <= self.preview_row < len(table.rows):
+            self.preview_row = 0 if table.rows else -1
+        if self._watcher.files():
+            self._watcher.removePaths(self._watcher.files())
+        if table.path is not None:
+            self._watcher.addPath(str(table.path))
+        self.merge_panel.set_table(table, keep_state=keep_state)
+        self.merge_panel.setVisible(True)
+        self._recompute_merge()
+        self._schedule_render()
+        self._refresh_list()
+        self.properties.refresh_geometry()
+
+    def reload_table(self, quiet: bool = False) -> None:
+        if self.table is None or self.table.path is None:
+            return
+        if self.printing:  # row numbers must not change while rows are being printed
+            self._reload_pending = True
+            return
+        path = self.table.path
+        if not path.exists():  # some programs replace the file when saving
+            if quiet and self._reload_attempts < 5:
+                self._reload_attempts += 1
+                self._reload_timer.start()
+            elif not quiet:
+                QMessageBox.warning(self, "Tabelle neu laden", f"„{path}“ gibt es nicht mehr.")
+            return
+        self._reload_attempts = 0
+        if str(path) not in self._watcher.files():
+            self._watcher.addPath(str(path))
+        try:
+            table = read_table(path)
+        except (OSError, TableError) as e:
+            if quiet:
+                self.statusBar().showMessage(f"Tabelle konnte nicht neu geladen werden: {e}", 8000)
+            else:
+                QMessageBox.warning(self, "Tabelle neu laden", f"„{path.name}“ kann nicht gelesen werden:\n{e}")
+            return
+        self._show_table(table, keep_state=True)
+        self.statusBar().showMessage(f"Tabelle neu geladen: {len(table.rows)} Zeilen", 4000)
+
+    def close_table(self) -> None:
+        self.table = None
+        self.merged = []
+        self.preview_row = -1
+        self._table_example = {}
+        if self._watcher.files():
+            self._watcher.removePaths(self._watcher.files())
+        self.merge_panel.setVisible(False)
+        self._update_merge_ui()
+        self._schedule_render()
+        self._refresh_list()
+        self.properties.refresh_geometry()
+
     # --- printing ----------------------------------------------------------
 
     def print_label(self) -> None:
-        self._print(self.label, self.copies_spin.value())
+        if self.table is not None:
+            self._print_table()
+            return
+        label = self.label
+        if merge.has_placeholders(label):
+            sample = merge.lookup(label.sample)
+            if missing := [c for c in merge.column_names(label) if merge.key(c) not in sample]:
+                QMessageBox.information(
+                    self,
+                    "Drucken",
+                    "Das Etikett holt Werte aus einer Tabelle (" + ", ".join(missing) + ").\n\n"
+                    "Für den Seriendruck zuerst „Tabelle öffnen …“ wählen oder bei diesen Feldern wieder feste "
+                    "Werte eintragen.",
+                )
+                return
+            label = merge.fill_label(label, label.sample, strict=False)[0]  # prints what the preview shows
+        self._print(label, self.copies_spin.value())
 
     def print_testpage(self) -> None:
         label = testpage_label(self.label.width_mm, self.label.height_mm, self.printhead_px / (self.model.dpi / 25.4))
         label.density, label.label_type = self.label.density, self.label.label_type
         self._print(label, 1)
 
-    def _print(self, label: Label, copies: int) -> None:
+    def _can_start_print(self) -> bool:
         if self.printing:
-            return
+            return False
         if self.printer_info is None:
             self.show_device_dialog()
-            return
+            return False
+        return True
 
-        errors = [e.validate() for e in label.elements if e.validate()]
-        if errors:
-            QMessageBox.warning(self, "Drucken", "Bitte zuerst korrigieren:\n\n" + "\n".join(errors))
-            return
-
+    def _confirm_printer_state(self, labels: int) -> bool:
         problems = []
         hb = self.heartbeat_data
         if hb and hb.lid_closed is False:
             problems.append("Der Deckel ist offen.")
         if hb and hb.paper_inserted is False:
             problems.append("Es ist kein Papier eingelegt.")
-        if self.rfid_info is not None and not self.rfid_info.tag_present:
+        info = self.rfid_info
+        if info is not None and not info.tag_present:
             problems.append("Keine Original-Etikettenrolle erkannt. Der B1 druckt dann eventuell nur leere Etiketten.")
+        elif info is not None and info.total_labels > 0 and labels > info.total_labels - info.used_labels:
+            left = info.total_labels - info.used_labels
+            problems.append(f"Auf der Rolle sind nur noch {left} Etiketten, gedruckt werden sollen {labels}.")
         if problems:
             answer = QMessageBox.question(self, "Drucken", "\n".join(problems) + "\n\nTrotzdem drucken?")
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+            return answer == QMessageBox.StandardButton.Yes
+        return True
 
+    def _print(self, label: Label, copies: int) -> None:
+        if not self._can_start_print():
+            return
+        errors = [e.validate() for e in label.elements if e.validate()]
+        if errors:
+            QMessageBox.warning(self, "Drucken", "Bitte zuerst korrigieren:\n\n" + "\n".join(errors))
+            return
+        if not self._confirm_printer_state(copies):
+            return
         image: Image.Image = print_image(
             label, self.model.dpi, self.printhead_px, self.config.offset_x_mm, self.config.offset_y_mm
         )
+        self._start_jobs([(image, copies, None)], label)
+
+    def _print_table(self) -> None:
+        if not self._can_start_print():
+            return
+        if self._merge_timer.isActive():
+            self._recompute_merge()
+        rows = self.merge_panel.checked()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Seriendruck",
+                "Keine Zeile zum Drucken ausgewählt. Zeilen mit Fehlern lassen sich erst drucken, wenn sie in "
+                "der Tabelle korrigiert sind.",
+            )
+            return
+        labels = sum(r.copies for r in rows)
+        if not self._confirm_printer_state(labels):
+            return
+        answer = QMessageBox.question(
+            self,
+            "Seriendruck",
+            f"{labels} Etikett{'en' if labels != 1 else ''} aus {len(rows)} Tabellenzeile"
+            f"{'n' if len(rows) != 1 else ''} drucken?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        jobs = self._render_jobs(rows)
+        if jobs is not None:
+            self._start_jobs(jobs, self.label)
+
+    def _render_jobs(self, rows: list[merge.MergedRow]) -> list[tuple[Image.Image, int, int]] | None:
+        dialog = None
+        if len(rows) > 20:
+            dialog = QProgressDialog("Etiketten werden vorbereitet …", "Abbrechen", 0, len(rows), self)
+            dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            dialog.setMinimumDuration(300)
+        jobs = []
+        for i, row in enumerate(rows):
+            if dialog is not None:
+                dialog.setValue(i)  # modal: also keeps the window responsive
+                if dialog.wasCanceled():
+                    return None
+            image = print_image(
+                row.label, self.model.dpi, self.printhead_px, self.config.offset_x_mm, self.config.offset_y_mm
+            )
+            jobs.append((image, row.copies, row.index))
+        if dialog is not None:
+            dialog.setValue(len(rows))
+        return jobs
+
+    def _start_jobs(self, jobs: list[tuple[Image.Image, int, int | None]], label: Label) -> None:
+        self._job = (0, len(jobs))
+        self._jobs_done = 0
+        self._job_labels = sum(copies for _, copies, _ in jobs)
         self._set_printing(True)
-        self._copies = copies
-        self.worker.print_image(image, label.density, label.label_type, copies)
+        self.worker.print_jobs(jobs, label.density, label.label_type)
 
     def _set_printing(self, printing: bool) -> None:
         self.printing = printing
@@ -911,23 +1293,42 @@ class MainWindow(QMainWindow):
         self.progress.setFormat("Übertragung …")
         self.cancel_button.setVisible(printing)
         self._update_printer_ui()
+        if not printing and self._reload_pending:
+            self._reload_pending = False
+            QTimer.singleShot(0, lambda: self.reload_table(quiet=True))
+
+    def _on_print_job(self, index: int, total: int) -> None:
+        self._job = (index, total)
+
+    def _on_print_job_done(self, tag: object) -> None:
+        self._jobs_done += 1
+        if isinstance(tag, int):
+            self.merge_panel.mark_printed(tag)
 
     def _on_print_progress(self, stage: str, fraction: float) -> None:
-        if stage == "transfer":
-            self.progress.setValue(round(fraction * 40))
-            self.progress.setFormat("Übertragung … %p %")
-        else:
-            self.progress.setValue(40 + round(fraction * 60))
-            self.progress.setFormat("Druck … %p %")
+        index, total = self._job
+        part = fraction * 0.4 if stage == "transfer" else 0.4 + fraction * 0.6
+        self.progress.setValue(round((index + part) / max(total, 1) * 100))
+        what = "Übertragung" if stage == "transfer" else "Druck"
+        prefix = f"Zeile {index + 1} von {total} · " if total > 1 else ""
+        self.progress.setFormat(f"{prefix}{what} … %p %")
 
     def _on_print_finished(self) -> None:
         self._set_printing(False)
-        n = getattr(self, "_copies", 1)
+        n = self._job_labels
         self.statusBar().showMessage(f"{n} Etikett{'en' if n != 1 else ''} gedruckt", 6000)
 
     def _on_print_failed(self, message: str) -> None:
         self._set_printing(False)
-        if message == "Druck abgebrochen":
+        cancelled = message == "Druck abgebrochen"
+        total = self._job[1]
+        if total > 1:
+            detail = f"{self._jobs_done} von {total} Zeilen gedruckt"
+            if cancelled:
+                self.statusBar().showMessage(f"{message}, {detail}", 8000)
+                return
+            message += f"\n\n{detail}. Sie sind in der Tabelle als gedruckt markiert, „Drucken“ macht mit den übrigen weiter."
+        if cancelled:
             self.statusBar().showMessage(message, 6000)
         else:
             QMessageBox.warning(self, "Druckfehler", message)

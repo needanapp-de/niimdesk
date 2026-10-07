@@ -42,7 +42,9 @@ class PrinterWorker(QObject):
     disconnected = Signal()
     heartbeat = Signal(object)  # Heartbeat
     rfid = Signal(object)  # RfidInfo
-    print_progress = Signal(str, float)
+    print_progress = Signal(str, float)  # stage of the current job, fraction
+    print_job = Signal(int, int)  # index of the job that starts, number of jobs
+    print_job_done = Signal(object)  # tag of the finished job
     print_finished = Signal()
     print_failed = Signal(str)
     printer_error = Signal(str)
@@ -82,7 +84,11 @@ class PrinterWorker(QObject):
         self._submit(self._disconnect())
 
     def print_image(self, image: Image.Image, density: int, label_type: int, copies: int) -> None:
-        self._submit(self._print(image.copy(), density, label_type, copies))
+        self.print_jobs([(image, copies, None)], density, label_type)
+
+    def print_jobs(self, jobs: list[tuple[Image.Image, int, Any]], density: int, label_type: int) -> None:
+        """Print several labels one after another: ``(image, copies, tag)``; stops at the first error."""
+        self._submit(self._print([(image.copy(), copies, tag) for image, copies, tag in jobs], density, label_type))
 
     def cancel_print(self) -> None:
         cancel = self._cancel
@@ -157,7 +163,7 @@ class PrinterWorker(QObject):
         except _EXPECTED_ERRORS as e:
             log.warning("RFID request failed: %s", e)
 
-    async def _print(self, image: Image.Image, density: int, label_type: int, copies: int) -> None:
+    async def _print(self, jobs: list[tuple[Image.Image, int, Any]], density: int, label_type: int) -> None:
         client = self._client
         if client is None or not client.is_connected:
             self.print_failed.emit("Kein Drucker verbunden")
@@ -165,14 +171,17 @@ class PrinterWorker(QObject):
 
         self._cancel = asyncio.Event()
         try:
-            await client.print_image(
-                image,
-                density=density,
-                label_type=label_type,
-                copies=copies,
-                progress=lambda stage, fraction: self.print_progress.emit(stage, fraction),
-                cancel=self._cancel,
-            )
+            for i, (image, copies, tag) in enumerate(jobs):
+                self.print_job.emit(i, len(jobs))
+                await client.print_image(
+                    image,
+                    density=density,
+                    label_type=label_type,
+                    copies=copies,
+                    progress=lambda stage, fraction: self.print_progress.emit(stage, fraction),
+                    cancel=self._cancel,
+                )
+                self.print_job_done.emit(tag)
         except PrintCancelled as e:
             self.print_failed.emit(str(e))
         except Exception as e:

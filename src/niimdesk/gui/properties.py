@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from niimdesk.gui.merge_widgets import ColumnButton, ElementContext
 from niimdesk.gui.qr_editor import QrContentEditor
 from niimdesk.render.fonts import DEFAULT_FAMILY, family_names
 from niimdesk.render.label import (
@@ -68,6 +69,7 @@ class PropertyPanel(QWidget):
         self._loading = False
         self._loaders: dict[type[Element], Callable[[Any], None]] = {}
         self._pages: dict[type[Element], int] = {}
+        self._context = ElementContext()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -112,6 +114,11 @@ class PropertyPanel(QWidget):
         self.set_element(None)
 
     # --- public ------------------------------------------------------------
+
+    def set_context(self, context: ElementContext) -> None:
+        """Gives the editors access to the label's table columns and the previewed table row."""
+        self._context = context
+        self._qr_editor.set_context(context)
 
     def set_element(self, element: Element | None) -> None:
         self._element = element
@@ -159,7 +166,7 @@ class PropertyPanel(QWidget):
         self.changed.emit()
 
     def _refresh_error(self) -> None:
-        error = self._element.validate() if self._element else None
+        error = self._context.check(self._element) if self._element else None
         self._error.setText(error or "")
 
     def _add_page(self, cls: type[Element], page: QWidget, loader: Callable[[Any], None]) -> None:
@@ -176,6 +183,12 @@ class PropertyPanel(QWidget):
         text.setFixedHeight(80)
         text.textChanged.connect(lambda: self._set("text", text.toPlainText()))
         form.addRow(text)
+
+        def insert_into_text(placeholder: str) -> None:
+            text.insertPlainText(placeholder)
+            text.setFocus()
+
+        form.addRow(ColumnButton(lambda: self._context, insert_into_text, "Text"))
 
         font = QComboBox()
         font.setEditable(True)
@@ -244,6 +257,12 @@ class PropertyPanel(QWidget):
         data = QLineEdit()
         data.textChanged.connect(lambda v: self._set("data", v))
         form.addRow("Inhalt", data)
+
+        def insert_into_data(placeholder: str) -> None:
+            data.insert(placeholder)
+            data.setFocus()
+
+        form.addRow(ColumnButton(lambda: self._context, insert_into_data, "Code"))
 
         kind = combo([(name, key) for key, name in BARCODE_TYPES.items()])
         kind.currentIndexChanged.connect(lambda _: self._set("symbology", kind.currentData()))

@@ -426,9 +426,11 @@ class Label:
     density: int = 3
     label_type: int = LabelType.WITH_GAPS
     elements: list[Element] = field(default_factory=list)
+    # example values of the table columns ({column} placeholders), shown in the preview without a table
+    sample: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "format": "niimdesk-label",
             "version": FORMAT_VERSION,
             "width_mm": self.width_mm,
@@ -437,6 +439,9 @@ class Label:
             "label_type": int(self.label_type),
             "elements": [e.to_dict() for e in self.elements],
         }
+        if self.sample:
+            data["sample"] = dict(self.sample)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Label:
@@ -448,6 +453,7 @@ class Label:
             density=int(data.get("density", 3)),
             label_type=int(data.get("label_type", LabelType.WITH_GAPS)),
             elements=[element_from_dict(e) for e in data.get("elements", []) if e.get("type") in ELEMENT_TYPES],
+            sample={str(k): str(v) for k, v in (data.get("sample") or {}).items()},
         )
 
 

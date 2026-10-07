@@ -15,6 +15,7 @@ dependencies = [
     "Pillow>=10.0",
     "qrcode>=7.4",
     "python-barcode>=0.15",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

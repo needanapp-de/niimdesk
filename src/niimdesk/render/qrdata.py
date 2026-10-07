@@ -23,6 +23,11 @@ class Field:
     placeholder: str = ""
     choices: tuple[tuple[str, str], ...] = ()  # (label, value)
     default: str = ""
+    column: str = ""  # table column name for serial printing, if the label alone is unclear
+
+    @property
+    def column_name(self) -> str:
+        return self.column or self.label
 
 
 @dataclass(frozen=True)
@@ -304,12 +309,12 @@ QR_TYPES: dict[str, QrType] = {
     for t in (
         QrType(
             "text", "Text",
-            (Field("text", "Text", "multiline", "Beliebiger Text"),),
+            (Field("text", "Text", "multiline", "Beliebiger Text", column="QR-Text"),),
             _text, lambda f: None if f["text"] else "QR-Code ist leer", "text",
         ),
         QrType(
             "url", "Link / Webseite",
-            (Field("url", "Adresse", placeholder="https://example.com"),),
+            (Field("url", "Adresse", placeholder="https://example.com", column="Link"),),
             _url, lambda f: _required(f, ("url", "Adresse")), "url",
         ),
         QrType(
@@ -369,25 +374,25 @@ QR_TYPES: dict[str, QrType] = {
         QrType(
             "email", "E-Mail",
             (
-                Field("address", "An", placeholder="name@example.com"),
+                Field("address", "An", placeholder="name@example.com", column="E-Mail"),
                 Field("subject", "Betreff"),
-                Field("body", "Text", "multiline"),
+                Field("body", "Text", "multiline", column="E-Mail-Text"),
             ),
             _email, _email_validate, "address",
         ),
         QrType(
             "tel", "Telefonnummer",
-            (Field("number", "Nummer", placeholder="+49 30 1234567"),),
+            (Field("number", "Nummer", placeholder="+49 30 1234567", column="Telefon"),),
             _tel, _number_validate, "number",
         ),
         QrType(
             "sms", "SMS",
-            (Field("number", "Nummer", placeholder="+49 170 1234567"), Field("message", "Nachricht", "multiline")),
+            (Field("number", "Nummer", placeholder="+49 170 1234567", column="Telefon"), Field("message", "Nachricht", "multiline")),
             _sms, _number_validate, "number",
         ),
         QrType(
             "whatsapp", "WhatsApp-Nachricht",
-            (Field("number", "Nummer", placeholder="+49 170 1234567"), Field("message", "Nachricht", "multiline")),
+            (Field("number", "Nummer", placeholder="+49 170 1234567", column="Telefon"), Field("message", "Nachricht", "multiline")),
             _whatsapp, _whatsapp_validate, "number",
         ),
         QrType(
@@ -412,8 +417,8 @@ QR_TYPES: dict[str, QrType] = {
             (
                 Field("name", "Empfänger"),
                 Field("iban", "IBAN", placeholder="DE89 3704 0044 0532 0130 00"),
-                Field("bic", "BIC (optional)"),
-                Field("amount", "Betrag in €", placeholder="optional, z. B. 12,50"),
+                Field("bic", "BIC (optional)", column="BIC"),
+                Field("amount", "Betrag in €", placeholder="optional, z. B. 12,50", column="Betrag"),
                 Field("reference", "Verwendungszweck"),
             ),
             _girocode, _girocode_validate, "name",

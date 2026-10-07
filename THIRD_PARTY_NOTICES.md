@@ -44,3 +44,5 @@ SOFTWARE.
 | Pillow | MIT-CMU (HPND) |
 | qrcode | BSD |
 | python-barcode | MIT |
+| openpyxl | MIT |
+| et-xmlfile | MIT |

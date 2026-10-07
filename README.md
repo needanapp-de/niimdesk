@@ -8,6 +8,7 @@ drucken, ohne die Handy-App.
 - Elemente mit der Maus verschieben und skalieren, Vorlagen als JSON speichern
 - Druckerstatus: Akku, Deckel, Papier, verbleibende Etiketten
 - **Erkennt die eingelegte Original-Rolle** am RFID-Chip und übernimmt Etikettengröße und Typ automatisch
+- **Seriendruck aus Excel:** ein Etikett pro Tabellenzeile, die passende Tabelle erstellt niimdesk selbst
 - Kommandozeile für Skripte und Automatisierung
 
 Getestet mit B1, Firmware 5.20, und Original-Etiketten 50 × 30 mm unter Ubuntu 26.04.
@@ -64,6 +65,40 @@ Ab dann verbindet sich niimdesk beim Start automatisch mit diesem Drucker.
   - Bild: gerastert oder mit Schwellwert.
 - **Datei-Menü:** Vorlagen (`.json`) speichern und öffnen. Bilder werden in die Vorlage eingebettet. Export als PNG.
 
+### Seriendruck aus einer Excel-Tabelle
+
+Ein Etikett pro Tabellenzeile, z. B. WLAN-Zugänge, Inventarnummern oder Namensschilder.
+
+1. **Felder an die Tabelle binden.**
+   - QR-Code: neben einem Feld auf das Tabellen-Symbol klicken oder „Alle Felder aus Tabelle“ wählen. Das
+     Feld zeigt dann `{Spaltenname}`.
+   - Text und Barcode: „Tabellenspalte einfügen“ oder `{Spaltenname}` direkt eintippen. Gemischt geht auch,
+     z. B. `Raum {Raum}` oder `https://example.com/inventar/{Nr}`.
+   - Der bisherige Wert wird zum Beispielwert. Die Vorschau zeigt ihn weiter an.
+2. **Seriendruck → Tabelle erstellen …** speichert eine Excel-Datei (`.xlsx`, wahlweise CSV) mit:
+   - einer Spalte pro Feld, Hinweise als Kommentar an der Überschrift,
+   - Zeile 2 als Beispiel,
+   - Auswahllisten für Felder mit festen Werten, z. B. die WLAN-Verschlüsselung,
+   - der Spalte „Anzahl“: wie oft die Zeile gedruckt wird, leer = Kopien aus niimdesk, 0 = überspringen.
+3. Die Tabelle in Excel oder LibreOffice ausfüllen und speichern.
+4. **Seriendruck → Tabelle öffnen …** zeigt die Zeilen unter der Vorschau.
+   - Ein Klick auf eine Zeile zeigt ihr Etikett in der Vorschau.
+   - Fehlerhafte Zeilen, z. B. mit zu kurzem WLAN-Passwort oder ungültiger IBAN, sind rot markiert und werden
+     nicht gedruckt.
+   - Die unveränderte Beispielzeile ist abgewählt.
+   - Speichern in Excel lädt die Tabelle automatisch neu.
+5. **„N Etiketten drucken“** druckt die angehakten Zeilen nacheinander. Bricht der Druck ab, z. B. weil das
+   Papier leer ist, sind die schon gedruckten Zeilen markiert. Erneutes Drucken macht mit den übrigen weiter.
+
+**Gut zu wissen:**
+- Eine von niimdesk erstellte Tabelle enthält ihr Etikett. Sie zu öffnen genügt, auch auf einem anderen
+  Rechner.
+- Eigene Tabellen gehen auch, wenn die Überschriften in der ersten Zeile zu den `{Spalten}` passen.
+  Groß- und Kleinschreibung spielen keine Rolle.
+- Formate: `.xlsx` und `.csv` (Semikolon oder Komma). `.xls`- und `.ods`-Dateien vorher als `.xlsx` speichern.
+- Datum und Uhrzeit als `TT.MM.JJJJ HH:MM`, Ja/Nein-Felder als `ja`/`nein` (auch `x`, `1`, `0`).
+- Echte WLAN-Passwörter landen nicht in der Beispielzeile.
+
 ### Etikettenrolle
 
 Original-Rollen haben einen RFID-Chip. Der B1 meldet darüber die Rollennummer, den Etikettentyp und wie viele
@@ -95,6 +130,10 @@ niimdesk testpage --size 50x30             # Testetikett
 niimdesk print logo.png --size 40x30 -c 3  # Bild drucken (3 Kopien)
 niimdesk print vorlage.json                # Vorlage aus der App drucken
 niimdesk render vorlage.json -o test.png   # nur rendern, ohne Drucker
+niimdesk table vorlage.json                # Excel-Tabelle für den Seriendruck erstellen
+niimdesk print vorlage-tabelle.xlsx        # Seriendruck: ein Etikett pro Tabellenzeile
+niimdesk print vorlage.json --data liste.csv --rows 3-10
+niimdesk render vorlage-tabelle.xlsx -o e.png   # e-003.png, e-004.png … ohne Drucker
 niimdesk calibrate --offset-x -0.25 --offset-y 0.8
 ```
 
@@ -104,6 +143,9 @@ niimdesk calibrate --offset-x -0.25 --offset-y 0.8
 | `-d 1..5` | Druckdichte |
 | `-t gaps\|black\|transparent` | Etikettentyp |
 | `--preview datei.png` | gerendertes Bild zusätzlich speichern |
+| `--data TABELLE` | Seriendruck aus `.xlsx`/`.csv` (bei Tabellen aus niimdesk nicht nötig) |
+| `--rows 3-10,12` | nur diese Tabellenzeilen |
+| `--skip-errors` | fehlerhafte Zeilen auslassen statt abzubrechen |
 | `-v` / `-vv` | Log bzw. alle Pakete ausgeben |
 
 Im gepackten Programm heißt der Befehl `niimdesk-cli`.
@@ -144,8 +186,10 @@ src/niimdesk/
   protocol/   packet.py (Rahmenformat), commands.py, encoder.py (Bild → Zeilenpakete),
               parsers.py, client.py (Verbindung, Status, Druckablauf)
   transport/  ble.py (bleak: Linux BlueZ, Windows WinRT)
-  render/     label.py (Etikettenmodell in mm → 1-Bit-Bild), fonts.py
-  gui/        PySide6-Oberfläche, worker.py (Bluetooth in eigenem Thread)
+  render/     label.py (Etikettenmodell in mm → 1-Bit-Bild), fonts.py, qrdata.py (QR-Inhaltstypen),
+              merge.py ({Spalte}-Platzhalter für den Seriendruck)
+  gui/        PySide6-Oberfläche, worker.py (Bluetooth in eigenem Thread), merge_panel.py (Tabellenansicht)
+  table.py    Excel/CSV lesen und Tabellenvorlagen schreiben
   cli.py, config.py, models.py
 ```
 
