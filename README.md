@@ -19,7 +19,8 @@ Getestet mit B1, Firmware 5.20, und Original-Etiketten 50 × 30 mm unter Ubuntu 
 
 ### Fertiges Paket
 
-Downloads unter **[Releases](https://github.com/needanapp-de/niimdesk/releases/latest)**:
+Downloads unter **[Releases](https://github.com/needanapp-de/niimdesk/releases/latest)**, gespiegelt auf
+[git.needanapp.de](https://git.needanapp.de/needanapp.de/niimdesk/releases):
 
 | System  | Datei                                  | Start                                     |
 |---------|----------------------------------------|-------------------------------------------|

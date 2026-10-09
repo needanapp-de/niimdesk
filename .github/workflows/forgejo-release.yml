@@ -1,0 +1,48 @@
+name: Release auf git.needanapp.de
+
+# Copies a published GitHub release (text and files) to the mirror on git.needanapp.de.
+# Runs after every release (called from build.yml) or by hand for an existing tag.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    secrets:
+      FORGEJO_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release-Tag, z. B. v0.1.0"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Release von GitHub holen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D release-files
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json name,body > release.json
+          ls -l release-files
+
+      - name: Auf git.needanapp.de veröffentlichen
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          python3 packaging/forgejo_release.py --url https://git.needanapp.de --repo needanapp.de/niimdesk \
+            --tag "$TAG" --notes release.json release-files/*

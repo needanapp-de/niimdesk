@@ -130,3 +130,11 @@ jobs:
             dist/niimdesk-*
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
+
+  forgejo:
+    needs: release
+    uses: ./.github/workflows/forgejo-release.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
