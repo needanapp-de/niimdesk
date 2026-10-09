@@ -19,13 +19,19 @@ Getestet mit B1, Firmware 5.20, und Original-Etiketten 50 × 30 mm unter Ubuntu 
 
 ### Fertiges Paket
 
-| System  | Datei                             | Start                       |
-|---------|-----------------------------------|-----------------------------|
-| Linux   | `niimdesk-linux-x86_64.tar.gz`    | entpacken, `niimdesk/niimdesk` |
-| Windows | `niimdesk-windows.zip`            | entpacken, `niimdesk\niimdesk.exe` |
+Downloads unter **[Releases](https://github.com/needanapp-de/niimdesk/releases/latest)**:
 
-Unter Linux trägt `packaging/install-linux.sh` die App ins Anwendungsmenü ein und legt den Befehl `niimdesk`
-in `~/.local/bin` an.
+| System  | Datei                                  | Start                                     |
+|---------|----------------------------------------|-------------------------------------------|
+| Windows | `niimdesk-<version>-windows-x64.zip`   | entpacken, `niimdesk\niimdesk.exe`        |
+| Linux   | `niimdesk-<version>-x86_64.AppImage`   | ausführbar machen (`chmod +x …`), starten |
+| Linux   | `niimdesk-<version>-linux-x86_64.tar.gz` | entpacken, `niimdesk/niimdesk`          |
+
+Das AppImage ist eine einzige Datei ohne Installation. Mit einem Befehl dahinter arbeitet es als
+Kommandozeilenprogramm, z. B. `./niimdesk-<version>-x86_64.AppImage info`.
+
+Aus dem `.tar.gz` trägt `packaging/install-linux.sh` die App ins Anwendungsmenü ein und legt den Befehl
+`niimdesk` in `~/.local/bin` an.
 
 ### Aus dem Quellcode (Python ≥ 3.11)
 
@@ -166,6 +172,7 @@ Im gepackten Programm heißt der Befehl `niimdesk-cli`.
 
 ```bash
 packaging/build-linux.sh        # -> dist/niimdesk/, dist/niimdesk-linux-x86_64.tar.gz
+packaging/build-appimage.sh     # danach: -> dist/niimdesk-<version>-x86_64.AppImage
 ```
 
 ```powershell
@@ -173,6 +180,10 @@ powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1   # -> dist
 ```
 
 Gebaut wird jeweils auf dem Zielsystem, denn PyInstaller kann nicht für ein anderes Betriebssystem bauen.
+
+**Release veröffentlichen:** Version in `src/niimdesk/__init__.py` und `pyproject.toml` erhöhen, einen
+Abschnitt in [CHANGELOG.md](CHANGELOG.md) anlegen, dann ein Tag `v<version>` pushen. GitHub Actions baut
+Windows und Linux, erzeugt die Prüfsummen und veröffentlicht das Release mit dem Text aus dem Changelog.
 Unter Windows braucht es Python ≥ 3.11 von python.org (mit dem `py`-Launcher).
 
 ## Entwicklung

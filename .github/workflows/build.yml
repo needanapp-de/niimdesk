@@ -44,6 +44,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Version
+        shell: bash
+        run: |
+          version=$(python -c "import niimdesk; print(niimdesk.__version__)")
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME passt nicht zur Version $version in src/niimdesk/__init__.py"
+            exit 1
+          fi
+
       - name: Test
         run: python -m pytest -q
 
@@ -60,7 +70,9 @@ jobs:
           cp packaging/niimdesk.png README.md LICENSE THIRD_PARTY_NOTICES.md dist/niimdesk/
           dist/niimdesk/niimdesk-cli diagnose
           dist/niimdesk/niimdesk-cli render -o dist/selftest.png
-          tar -czf dist/${{ matrix.artifact }}.tar.gz -C dist niimdesk
+          tar -czf dist/niimdesk-$VERSION-linux-x86_64.tar.gz -C dist niimdesk
+          packaging/build-appimage.sh "$VERSION"
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/niimdesk-$VERSION-x86_64.AppImage diagnose
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -70,14 +82,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "diagnose failed" }
           dist\niimdesk\niimdesk-cli.exe render -o dist\selftest.png
           if ($LASTEXITCODE -ne 0) { throw "render failed" }
-          Compress-Archive -Path dist\niimdesk -DestinationPath dist\${{ matrix.artifact }}.zip
+          Compress-Archive -Path dist\niimdesk -DestinationPath "dist\niimdesk-$env:VERSION-windows-x64.zip"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/${{ matrix.artifact }}.zip
-            dist/${{ matrix.artifact }}.tar.gz
+            dist/niimdesk-*.zip
+            dist/niimdesk-*.tar.gz
+            dist/niimdesk-*.AppImage
           if-no-files-found: error
 
   release:
@@ -88,14 +101,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: dist
           merge-multiple: true
 
+      - name: Release notes and checksums
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # section "## <version> …" of CHANGELOG.md up to the next "## "
+          awk -v v="$version" '/^## / { if (found) exit; found = index($0, "## " v " ") == 1 || $0 == "## " v; next } found' \
+            CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md hat keinen Abschnitt für $version"
+            exit 1
+          fi
+          cd dist && sha256sum niimdesk-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
+          name: niimdesk ${{ github.ref_name }}
+          body_path: release-notes.md
           files: |
-            dist/niimdesk-windows.zip
-            dist/niimdesk-linux-x86_64.tar.gz
+            dist/niimdesk-*
+            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true

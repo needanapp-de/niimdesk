@@ -3,12 +3,13 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 root = Path(SPECPATH).parent
 icon = root / "packaging" / ("niimdesk.ico" if sys.platform == "win32" else "niimdesk.png")
 
 datas = [(str(root / "src" / "niimdesk" / "fonts"), "niimdesk/fonts")]
+datas += copy_metadata("bleak")  # version shown by "niimdesk-cli diagnose"
 binaries = []
 hiddenimports = collect_submodules("bleak")
 
